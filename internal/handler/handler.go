@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -38,6 +39,8 @@ var instanceNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 var envVarKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const sessionCookieName = "_cc_session"
+
+const defaultInstanceWorkDir = "/root"
 
 // wsTokenEntry holds a one-time WebSocket auth token with its creation time.
 type wsTokenEntry struct {
@@ -438,6 +441,7 @@ type instanceResponse struct {
 	ContainerID    string            `json:"container_id"`
 	Status         string            `json:"status"`
 	ErrorMsg       string            `json:"error_msg"`
+	HostProjectPath string           `json:"host_project_path"`
 	WorkDir        string            `json:"work_dir"`
 	MemoryMB       int               `json:"memory_mb"`
 	CPUCores       float64           `json:"cpu_cores"`
@@ -450,19 +454,38 @@ type instanceResponse struct {
 
 func toInstanceResponse(inst *store.Instance) instanceResponse {
 	return instanceResponse{
-		ID:          inst.ID,
-		Name:        inst.Name,
-		ContainerID: inst.ContainerID,
-		Status:      inst.Status,
-		ErrorMsg:    inst.ErrorMsg,
-		WorkDir:     inst.WorkDir,
-		MemoryMB:    inst.MemoryMB,
-		CPUCores:    inst.CPUCores,
-		EnvVars:     inst.EnvVars,
-		AccessToken: inst.AccessToken,
-		CreatedAt:   inst.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:   inst.UpdatedAt.Format(time.RFC3339),
+		ID:              inst.ID,
+		Name:            inst.Name,
+		ContainerID:     inst.ContainerID,
+		Status:          inst.Status,
+		ErrorMsg:        inst.ErrorMsg,
+		HostProjectPath: inst.HostProjectPath,
+		WorkDir:         inst.WorkDir,
+		MemoryMB:        inst.MemoryMB,
+		CPUCores:        inst.CPUCores,
+		EnvVars:         inst.EnvVars,
+		AccessToken:     inst.AccessToken,
+		CreatedAt:       inst.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:       inst.UpdatedAt.Format(time.RFC3339),
 	}
+}
+
+func resolveWorkspaceConfig(hostProjectPath string) (string, string, error) {
+	cleaned := strings.TrimSpace(hostProjectPath)
+	if cleaned == "" {
+		return "", defaultInstanceWorkDir, nil
+	}
+	if !filepath.IsAbs(cleaned) {
+		return "", "", fmt.Errorf("host_project_path must be an absolute path")
+	}
+
+	cleaned = filepath.Clean(cleaned)
+	base := filepath.Base(cleaned)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return "", "", fmt.Errorf("host_project_path must point to a project directory, not the filesystem root")
+	}
+
+	return cleaned, path.Join("/workspace", base), nil
 }
 
 func toInstanceResponses(instances []*store.Instance) []instanceResponse {
@@ -551,10 +574,11 @@ func (h *Handler) apiGetInstance(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiCreateInstance(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit (#17)
 	var req struct {
-		Name     string            `json:"name"`
-		MemoryMB int               `json:"memory_mb"`
-		CPUCores float64           `json:"cpu_cores"`
-		EnvVars  map[string]string `json:"env_vars"`
+		Name            string            `json:"name"`
+		MemoryMB        int               `json:"memory_mb"`
+		CPUCores        float64           `json:"cpu_cores"`
+		EnvVars         map[string]string `json:"env_vars"`
+		HostProjectPath string            `json:"host_project_path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -595,15 +619,22 @@ func (h *Handler) apiCreateInstance(w http.ResponseWriter, r *http.Request) {
 		envVars[k] = v
 	}
 
+	hostProjectPath, workDir, err := resolveWorkspaceConfig(req.HostProjectPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	inst := &store.Instance{
-		Name:        req.Name,
-		Status:      "created",
-		Port:        docker.ContainerPort(),
-		WorkDir:     "/root",
-		EnvVars:     envVars,
-		MemoryMB:    req.MemoryMB,
-		CPUCores:    req.CPUCores,
-		AccessToken: accessToken,
+		Name:            req.Name,
+		Status:          "created",
+		Port:            docker.ContainerPort(),
+		HostProjectPath: hostProjectPath,
+		WorkDir:         workDir,
+		EnvVars:         envVars,
+		MemoryMB:        req.MemoryMB,
+		CPUCores:        req.CPUCores,
+		AccessToken:     accessToken,
 	}
 
 	// #13: retry on ID collision (astronomically rare but correct to handle)
@@ -1725,6 +1756,7 @@ func (h *Handler) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 // --- Proxy handlers (unchanged) ---
 
 const instanceCookieName = "_cc_inst"
+const instanceRouteQueryParam = "__cc_inst"
 
 func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -1916,14 +1948,35 @@ func (h *Handler) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) resolveInstanceID(r *http.Request) string {
+	if id := r.URL.Query().Get(instanceRouteQueryParam); instanceIDRe.MatchString(id) {
+		return id
+	}
 	if id := extractInstanceIDFromReferer(r); id != "" {
 		return id
+	}
+	// Do not let a stale instance cookie hijack top-level dashboard/admin
+	// navigations after a user has visited an OpenCode container page.
+	if isDocumentNavigation(r) {
+		return ""
 	}
 	// M7: validate the cookie value before using it as an instance ID.
 	if c, err := r.Cookie(instanceCookieName); err == nil && instanceIDRe.MatchString(c.Value) {
 		return c.Value
 	}
 	return ""
+}
+
+func isDocumentNavigation(r *http.Request) bool {
+	if !strings.EqualFold(r.Method, http.MethodGet) {
+		return false
+	}
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	if strings.EqualFold(r.Header.Get("Sec-Fetch-Dest"), "document") {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 func extractInstanceIDFromReferer(r *http.Request) string {

@@ -215,7 +215,7 @@ func dynamicCORSMiddleware(flagOrigins []string, cfgMgr *config.Manager, next ht
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Opencode-Directory")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			}
 		}

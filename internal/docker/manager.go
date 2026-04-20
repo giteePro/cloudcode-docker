@@ -177,13 +177,25 @@ func (m *Manager) CreateContainer(ctx context.Context, inst *store.Instance) (st
 			})
 		}
 	}
+	if inst.HostProjectPath != "" {
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeBind,
+			Source: inst.HostProjectPath,
+			Target: inst.WorkDir,
+		})
+	}
+
+	workDir := strings.TrimSpace(inst.WorkDir)
+	if workDir == "" {
+		workDir = "/root"
+	}
 
 	exposedPort := network.MustParsePort(fmt.Sprintf("%d/tcp", containerPort))
 	resp, err := m.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: containerName,
 		Config: &container.Config{
 			Image:      m.image,
-			WorkingDir: "/root",
+			WorkingDir: workDir,
 			Env:        env,
 			Labels: map[string]string{
 				labelManaged: "true",

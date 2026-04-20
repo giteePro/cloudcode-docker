@@ -15,19 +15,20 @@ import (
 
 // Instance represents an opencode container instance.
 type Instance struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	ContainerID string            `json:"container_id"`
-	Status      string            `json:"status"` // created, running, stopped, error
-	ErrorMsg    string            `json:"error_msg"`
-	Port        int               `json:"port"`
-	WorkDir     string            `json:"work_dir"`
-	EnvVars     map[string]string `json:"env_vars"`     // API keys, GH_TOKEN, etc.
-	MemoryMB    int               `json:"memory_mb"`    // 0 = unlimited
-	CPUCores    float64           `json:"cpu_cores"`    // 0 = unlimited
-	AccessToken string            `json:"access_token"` // per-instance Basic Auth password
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	ContainerID     string            `json:"container_id"`
+	Status          string            `json:"status"` // created, running, stopped, error
+	ErrorMsg        string            `json:"error_msg"`
+	HostProjectPath string            `json:"host_project_path"`
+	Port            int               `json:"port"`
+	WorkDir         string            `json:"work_dir"`
+	EnvVars         map[string]string `json:"env_vars"`     // API keys, GH_TOKEN, etc.
+	MemoryMB        int               `json:"memory_mb"`    // 0 = unlimited
+	CPUCores        float64           `json:"cpu_cores"`    // 0 = unlimited
+	AccessToken     string            `json:"access_token"` // per-instance Basic Auth password
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
 }
 
 // ContainerResources returns Docker resource constraints based on instance config.
@@ -114,6 +115,7 @@ func (s *Store) migrate() error {
 			container_id TEXT NOT NULL DEFAULT '',
 			status       TEXT NOT NULL DEFAULT 'created',
 			error_msg    TEXT NOT NULL DEFAULT '',
+			host_project_path TEXT NOT NULL DEFAULT '',
 			port         INTEGER NOT NULL DEFAULT 0,
 			work_dir     TEXT NOT NULL DEFAULT '/root',
 			env_vars     TEXT NOT NULL DEFAULT '{}',
@@ -130,6 +132,7 @@ func (s *Store) migrate() error {
 
 	// Migration: add access_token column to existing databases.
 	_, _ = s.db.Exec(`ALTER TABLE instances ADD COLUMN access_token TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE instances ADD COLUMN host_project_path TEXT NOT NULL DEFAULT ''`)
 
 	return nil
 }
@@ -146,9 +149,9 @@ func (s *Store) Create(inst *Instance) error {
 	inst.UpdatedAt = now
 
 	_, err = s.db.Exec(`
-		INSERT INTO instances (id, name, container_id, status, error_msg, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, inst.ID, inst.Name, inst.ContainerID, inst.Status, inst.ErrorMsg, inst.Port, inst.WorkDir, string(envJSON), inst.MemoryMB, inst.CPUCores, inst.AccessToken, inst.CreatedAt, inst.UpdatedAt)
+		INSERT INTO instances (id, name, container_id, status, error_msg, host_project_path, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, inst.ID, inst.Name, inst.ContainerID, inst.Status, inst.ErrorMsg, inst.HostProjectPath, inst.Port, inst.WorkDir, string(envJSON), inst.MemoryMB, inst.CPUCores, inst.AccessToken, inst.CreatedAt, inst.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert instance: %w", err)
 	}
@@ -157,19 +160,19 @@ func (s *Store) Create(inst *Instance) error {
 
 // Get retrieves an instance by ID.
 func (s *Store) Get(id string) (*Instance, error) {
-	row := s.db.QueryRow(`SELECT id, name, container_id, status, error_msg, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at FROM instances WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, name, container_id, status, error_msg, host_project_path, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at FROM instances WHERE id = ?`, id)
 	return scanInstance(row)
 }
 
 // GetByName retrieves an instance by name.
 func (s *Store) GetByName(name string) (*Instance, error) {
-	row := s.db.QueryRow(`SELECT id, name, container_id, status, error_msg, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at FROM instances WHERE name = ?`, name)
+	row := s.db.QueryRow(`SELECT id, name, container_id, status, error_msg, host_project_path, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at FROM instances WHERE name = ?`, name)
 	return scanInstance(row)
 }
 
 // List returns all instances.
 func (s *Store) List() ([]*Instance, error) {
-	rows, err := s.db.Query(`SELECT id, name, container_id, status, error_msg, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at FROM instances ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT id, name, container_id, status, error_msg, host_project_path, port, work_dir, env_vars, memory_mb, cpu_cores, access_token, created_at, updated_at FROM instances ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("query instances: %w", err)
 	}
@@ -196,9 +199,9 @@ func (s *Store) Update(inst *Instance) error {
 	inst.UpdatedAt = time.Now()
 
 	res, err := s.db.Exec(`
-		UPDATE instances SET name=?, container_id=?, status=?, error_msg=?, port=?, work_dir=?, env_vars=?, memory_mb=?, cpu_cores=?, access_token=?, updated_at=?
+		UPDATE instances SET name=?, container_id=?, status=?, error_msg=?, host_project_path=?, port=?, work_dir=?, env_vars=?, memory_mb=?, cpu_cores=?, access_token=?, updated_at=?
 		WHERE id=?
-	`, inst.Name, inst.ContainerID, inst.Status, inst.ErrorMsg, inst.Port, inst.WorkDir, string(envJSON), inst.MemoryMB, inst.CPUCores, inst.AccessToken, inst.UpdatedAt, inst.ID)
+	`, inst.Name, inst.ContainerID, inst.Status, inst.ErrorMsg, inst.HostProjectPath, inst.Port, inst.WorkDir, string(envJSON), inst.MemoryMB, inst.CPUCores, inst.AccessToken, inst.UpdatedAt, inst.ID)
 	if err != nil {
 		return fmt.Errorf("update instance: %w", err)
 	}
@@ -224,7 +227,7 @@ func (s *Store) Close() error {
 func scanRow(scan func(dest ...any) error) (*Instance, error) {
 	var inst Instance
 	var envJSON string
-	if err := scan(&inst.ID, &inst.Name, &inst.ContainerID, &inst.Status, &inst.ErrorMsg, &inst.Port, &inst.WorkDir, &envJSON, &inst.MemoryMB, &inst.CPUCores, &inst.AccessToken, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+	if err := scan(&inst.ID, &inst.Name, &inst.ContainerID, &inst.Status, &inst.ErrorMsg, &inst.HostProjectPath, &inst.Port, &inst.WorkDir, &envJSON, &inst.MemoryMB, &inst.CPUCores, &inst.AccessToken, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(envJSON), &inst.EnvVars); err != nil {
